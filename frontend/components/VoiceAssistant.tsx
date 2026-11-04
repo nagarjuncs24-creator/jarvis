@@ -26,7 +26,7 @@ declare global {
   }
 }
 
-export function VoiceAssistant() {
+export function VoiceAssistant({ onTranscript }: { onTranscript?: (text: string) => void }) {
   const recognition = useRef<RecognitionInstance | null>(null);
   const [supported, setSupported] = useState(false);
   const [listening, setListening] = useState(false);
@@ -48,6 +48,7 @@ export function VoiceAssistant() {
     instance.onresult = (event) => {
       const text = Array.from(event.results).map((result) => result[0].transcript).join("");
       setTranscript(text);
+      if (event.results[event.results.length - 1].isFinal) onTranscript?.(text);
       setMessage(event.results[event.results.length - 1].isFinal ? "Voice captured" : "Listening…");
     };
     instance.onerror = (event) => { setListening(false); setMessage(`Voice error: ${event.error}`); };

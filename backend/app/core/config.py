@@ -20,6 +20,7 @@ class Settings(BaseSettings):
     llm_provider: str = ""
     openai_api_key: str | None = None
     openai_model: str | None = None
+    embedding_model: str | None = None
 
     @model_validator(mode="after")
     def require_secure_production_secret(self):

@@ -5,7 +5,7 @@ from sqlalchemy import select
 
 from app.api.dependencies import CurrentUser, DatabaseSession
 from app.models import Memory
-from app.schemas.memory import MemoryCreate, MemoryResponse
+from app.schemas.memory import MemoryCreate, MemoryResponse, MemoryUpdate
 from app.services.audit import record_audit_event
 
 router = APIRouter(prefix="/api/v1/memories", tags=["memory"])
@@ -26,6 +26,21 @@ def create_memory(payload: MemoryCreate, database: DatabaseSession, user: Curren
     memory = Memory(user_id=user.id, content=payload.content, kind=payload.kind)
     database.add(memory)
     record_audit_event(database, "memory.created", user.id)
+    database.commit()
+    database.refresh(memory)
+    return memory
+
+
+@router.patch("/{memory_id}", response_model=MemoryResponse)
+def update_memory(memory_id: UUID, payload: MemoryUpdate, database: DatabaseSession, user: CurrentUser) -> Memory:
+    memory = database.scalar(select(Memory).where(Memory.id == memory_id, Memory.user_id == user.id))
+    if memory is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Memory not found")
+    duplicate = database.scalar(select(Memory).where(Memory.user_id == user.id, Memory.content == payload.content, Memory.id != memory.id))
+    if duplicate is not None:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="This memory is already saved")
+    memory.content = payload.content
+    record_audit_event(database, "memory.updated", user.id, f"memory={memory.id}")
     database.commit()
     database.refresh(memory)
     return memory

@@ -16,3 +16,7 @@ class MemoryResponse(BaseModel):
     kind: str
     content: str
     created_at: datetime
+
+
+class MemoryUpdate(BaseModel):
+    content: str = Field(min_length=2, max_length=10_000)

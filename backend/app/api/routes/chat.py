@@ -9,8 +9,9 @@ from sqlalchemy import func, select
 
 from app.ai.llm import ChatTurn, LLMConfigurationError, get_llm_provider
 from app.ai.prompts import SYSTEM_PROMPT
+from app.agents.orchestrator import agent_graph
 from app.api.dependencies import CurrentUser, DatabaseSession
-from app.models import Conversation, Message
+from app.models import Conversation, Message, ToolExecution
 from app.schemas.conversations import MessageCreate
 from app.services.audit import record_audit_event
 
@@ -28,15 +29,28 @@ def get_owned_conversation(database: DatabaseSession, user_id: UUID, conversatio
     return conversation
 
 
+def tool_result_text(tool: str, result: dict) -> str:
+    if tool == "calculator":
+        return f"{result['expression']} = {result['result']:g}"
+    if tool == "date_time":
+        return f"The current UTC time is {result['utc']}."
+    return "The approved tool completed."
+
+
 @router.post("/{conversation_id}/stream")
 async def stream_chat(conversation_id: UUID, payload: MessageCreate, database: DatabaseSession, user: CurrentUser) -> StreamingResponse:
     conversation = get_owned_conversation(database, user.id, conversation_id)
-    try:
-        provider = get_llm_provider()
-    except LLMConfigurationError as error:
-        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(error)) from error
+    agent_result = agent_graph.invoke({"instruction": payload.content, "planned_tool": None, "tool_input": {}, "tool_result": None, "status": "pending", "summary": ""})
+    provider = None
+    if agent_result["planned_tool"] is None:
+        try:
+            provider = get_llm_provider()
+        except LLMConfigurationError as error:
+            raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(error)) from error
     next_sequence = database.scalar(select(func.coalesce(func.max(Message.sequence), 0) + 1).where(Message.conversation_id == conversation.id))
     database.add(Message(conversation_id=conversation.id, role="user", content=payload.content, sequence=next_sequence))
+    if agent_result["planned_tool"] is not None:
+        database.add(ToolExecution(user_id=user.id, tool_name=agent_result["planned_tool"], status=agent_result["status"], summary=agent_result["summary"]))
     database.commit()
     history = list(database.scalars(select(Message).where(Message.conversation_id == conversation.id).order_by(Message.sequence.desc()).limit(30)))
     turns = [ChatTurn(role="system", content=SYSTEM_PROMPT)] + [ChatTurn(role=message.role, content=message.content) for message in reversed(history)]
@@ -44,9 +58,18 @@ async def stream_chat(conversation_id: UUID, payload: MessageCreate, database: D
         chunks: list[str] = []
         try:
             yield sse("status", {"state": "generating"})
-            async for chunk in provider.stream_text(turns):
-                chunks.append(chunk)
-                yield sse("token", {"text": chunk})
+            if agent_result["planned_tool"] is not None:
+                if agent_result["status"] == "failed":
+                    text = agent_result["summary"]
+                else:
+                    text = tool_result_text(agent_result["planned_tool"], agent_result["tool_result"])
+                chunks.append(text)
+                yield sse("tool", {"name": agent_result["planned_tool"]})
+                yield sse("token", {"text": text})
+            else:
+                async for chunk in provider.stream_text(turns):
+                    chunks.append(chunk)
+                    yield sse("token", {"text": chunk})
             text = "".join(chunks).strip()
             if text:
                 database.add(Message(conversation_id=conversation.id, role="assistant", content=text, sequence=next_sequence + 1))
